@@ -850,7 +850,6 @@ class GPT(nn.Module):
             logits_proj = self.lm_head(x)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         if sample_bottom_half:
-            print("Sampling bottom half of losses")
             losses = F.cross_entropy(logits.float(), targets, reduction="none")
             return reduce_token_losses(losses, True)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
@@ -1075,6 +1074,7 @@ def main() -> None:
         f"head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} "
         f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
     )
+    log0(f"loss_sampling_bottom_half:{args.loss_sampling_bottom_half}")
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
