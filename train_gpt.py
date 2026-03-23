@@ -49,6 +49,8 @@ class Hyperparameters:
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
+    # When enabled, training keeps only the lowest-loss half of tokens in each batch.
+    loss_sampling_bottom_half = bool(int(os.environ.get("LOSS_SAMPLING_BOTTOM_HALF", "0")))
 
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -216,6 +218,19 @@ def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
     return tokens[: usable + 1]
 
 
+def reduce_token_losses(losses: Tensor, bottom_half_only: bool) -> Tensor:
+    flat_losses = losses.reshape(-1).float()
+    if not bottom_half_only:
+        return flat_losses.mean()
+
+    n_tokens = int(flat_losses.numel())
+    keep_tokens = max((n_tokens + 1) // 2, 1)
+    if keep_tokens >= n_tokens:
+        return flat_losses.mean()
+    sorted_losses = torch.sort(flat_losses).values
+    return sorted_losses[:keep_tokens].mean()
+
+
 def eval_val(
     args: Hyperparameters,
     model: nn.Module,
@@ -256,7 +271,7 @@ def eval_val(
             x = local[:-1].reshape(-1, args.train_seq_len)
             y = local[1:].reshape(-1, args.train_seq_len)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                batch_loss = model(x, y).detach()
+                batch_loss = model(x, y, sample_bottom_half=False).detach()
             batch_token_count = float(y.numel())
             val_loss_sum += batch_loss.to(torch.float64) * batch_token_count
             val_token_count += batch_token_count
@@ -659,6 +674,7 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        loss_sampling_bottom_half: bool = False,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -666,6 +682,7 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.loss_sampling_bottom_half = loss_sampling_bottom_half
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -697,7 +714,14 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def forward(
+        self,
+        input_ids: Tensor,
+        target_ids: Tensor,
+        sample_bottom_half: bool | None = None,
+    ) -> Tensor:
+        if sample_bottom_half is None:
+            sample_bottom_half = self.loss_sampling_bottom_half
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
@@ -721,6 +745,9 @@ class GPT(nn.Module):
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
             logits_proj = self.lm_head(x)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+        if sample_bottom_half:
+            losses = F.cross_entropy(logits.float(), targets, reduction="none")
+            return reduce_token_losses(losses, True)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
 
@@ -835,6 +862,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        loss_sampling_bottom_half=args.loss_sampling_bottom_half,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
