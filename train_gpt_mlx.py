@@ -197,7 +197,9 @@ def resolve_loss_sampling_mode(
     top_half_only: bool, bottom_half_only: bool
 ) -> str | None:
     if top_half_only and bottom_half_only:
-        raise ValueError("LOSS_SAMPLING_TOP_HALF and LOSS_SAMPLING_BOTTOM_HALF are mutually exclusive")
+        raise ValueError(
+            "LOSS_SAMPLING_TOP_HALF and LOSS_SAMPLING_BOTTOM_HALF are mutually exclusive"
+        )
     if top_half_only:
         return "top"
     if bottom_half_only:
@@ -575,7 +577,9 @@ class GPT(nn.Module):
                 )
                 loss_chunks.append(losses.reshape(-1))
         if sampling_mode is not None:
-            return reduce_token_losses(mx.concatenate(loss_chunks, axis=0), sampling_mode)
+            return reduce_token_losses(
+                mx.concatenate(loss_chunks, axis=0), sampling_mode
+            )
         return mx.array(loss_sum / float(n), dtype=mx.float32)
 
 
